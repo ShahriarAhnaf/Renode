@@ -229,6 +229,7 @@
 - tests/unit-tests/memory-access.robot
 - tests/unit-tests/resd-serialization.robot
 - tests/unit-tests/tlib/arm/thumb2-data-processing-instr.robot
+- tests/unit-tests/tlib/arm/thumb2-mov-sp-unpredictable.robot
 - tests/peripherals/VirtioMMIOEntropy.robot
 - tests/peripherals/VirtioMMIOConsole.robot
 - tests/unit-tests/riscv-stack-access-hook.robot
