@@ -72,7 +72,7 @@ cd renode_portable
 export PATH="`pwd`:$PATH"
 ```
 
-Please note that the portable package requires GTK2 to be available on the host to run with the UI enabled.
+Please note that the portable package requires GTK3 to be available on the host to run with the UI enabled.
 
 Follow the [Additional Prerequisites](#additional-prerequisites-for-robot-framework-testing) section if you wish to use Robot Framework for testing.
 Otherwise, proceed to the 'Running Renode' section.
@@ -101,15 +101,27 @@ Alternatively, for Mono-based setups, you can download the Mono package directly
 To install modern dotnet (as opposed to .NET Framework) on Windows, follow [the official installation guide](https://learn.microsoft.com/en-us/dotnet/core/install/windows).
 The **.NET SDK** includes runtime, so you will be able to build and run Renode.
 
-#### Other dependencies (Linux only)
+#### Other dependencies
+
+##### Linux
 
 On Ubuntu 20.04, you can install the remaining dependencies with the following command:
 
 ```
-sudo apt-get install policykit-1 libgtk2.0-0 screen uml-utilities gtk-sharp2 libc6-dev libicu-dev gcc python3 python3-pip
+sudo apt-get install policykit-1 libgtk-3-0 screen uml-utilities gtk-sharp2 libc6-dev libicu-dev gcc python3 python3-pip
 ```
 
 If you are running a different distribution, you will need to install an analogous list of packages using your package manager; note that the package names may differ slightly.
+
+##### macOS
+
+To run Renode with the GUI enabled, GTK3 is required. Install it using [Homebrew](https://brew.sh/):
+
+```
+brew install gtk+3
+```
+
+Without GTK3, Renode will fall back to console-only mode.
 
 ### Installing from packages
 

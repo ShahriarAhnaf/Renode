@@ -1,11 +1,24 @@
 #!/bin/sh
 
 #get the bundle's MacOS directory full path
-DIR=`dirname $0`
+DIR=$(cd "$(dirname "$0")" && pwd)
 
 EXE_PATH="$DIR/bin/Renode.exe"
 PROCESS_NAME=appname
 APPNAME="Renode"
+
+# On macOS, GUI frameworks require the process to be launched through
+# the .app bundle to get a proper connection to the WindowServer.
+# When invoked directly from terminal (not through macos_run.sh/bundle),
+# re-launch via 'open' with the bundle to acquire GUI context.
+if [ "${__RENODE_MACOS_BUNDLE_LAUNCHED:-0}" != "1" ]; then
+    BUNDLE_DIR=$(cd "$DIR/../.." && pwd)
+    case "$BUNDLE_DIR" in
+        *.app)
+            exec open -n -a "$BUNDLE_DIR" --args "$@"
+            ;;
+    esac
+fi
 
 #set up environment
 MONO_FRAMEWORK_PATH=/Library/Frameworks/Mono.framework/Versions/Current
@@ -40,4 +53,4 @@ then
 fi
 
 #run app using mono
-exec -a \"$PROCESS_NAME\" mono $MONO_OPTIONS "$EXE_PATH" "$@"
+exec -a "$PROCESS_NAME" mono $MONO_OPTIONS "$EXE_PATH" "$@"

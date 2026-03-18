@@ -1,2 +1,6 @@
 #!/bin/sh
-exec open `dirname $0`/macos_run.command
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+
+export __RENODE_MACOS_BUNDLE_LAUNCHED=1
+exec "$DIR/macos_run.command" "$@"
