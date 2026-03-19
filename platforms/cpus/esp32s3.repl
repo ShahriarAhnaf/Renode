@@ -1,0 +1,100 @@
+// ESP32-S3 (Xtensa LX7) platform description
+// Memory map from ESP32-S3 Technical Reference Manual
+// Designed for running ESP-IDF firmware with ELF direct loading (skipping ROM bootloader)
+
+cpu: CPU.Xtensa @ sysbus
+    cpuType: "esp32s3"
+    frequency: 240000000
+
+// Internal ROM (1st stage bootloader, 384KB)
+// Contains reset vector at 0x40000400
+rom: Memory.MappedMemory @ sysbus 0x40000000
+    size: 0x60000
+
+// Internal SRAM - instruction bus view (448KB)
+// ESP-IDF .iram0.vectors and .iram0.text land here
+iram: Memory.MappedMemory @ sysbus 0x40370000
+    size: 0x70000
+
+// Internal SRAM - data bus view (512KB)
+// ESP-IDF .dram0.data and .dram0.bss land here
+dram: Memory.MappedMemory @ sysbus 0x3FC88000
+    size: 0x78000
+
+// External flash cache - instruction bus (code execution from flash, 8MB window)
+// ESP-IDF .flash.text maps here via MMU
+flashCode: Memory.MappedMemory @ sysbus 0x42000000
+    size: 0x800000
+
+// External flash cache - data bus (read-only data from flash, 8MB window)
+// ESP-IDF .flash.rodata maps here via MMU
+flashData: Memory.MappedMemory @ sysbus 0x3C000000
+    size: 0x800000
+
+// RTC FAST memory (8KB)
+rtcFast: Memory.MappedMemory @ sysbus 0x600FE000
+    size: 0x2000
+
+// Peripheral stub region for unmodeled registers
+// Covers gaps between modeled peripherals in the 0x6000xxxx space
+peripheralStub: Memory.MappedMemory @ sysbus 0x60000000
+    size: 0xFE000
+
+// --- Modeled Peripherals ---
+
+uart0: UART.ESP32_UART @ sysbus 0x60000000
+uart1: UART.ESP32_UART @ sysbus 0x60010000
+
+gpio: GPIOPort.ESP32S3_GPIO @ sysbus 0x60004000
+
+rtcCntl: Miscellaneous.ESP32S3_RTC_CNTL @ sysbus 0x60008000
+
+systemControl: Miscellaneous.ESP32S3_SystemControl @ sysbus 0x600C0000
+
+extmem: Miscellaneous.ESP32S3_EXTMEM @ sysbus 0x600E1000
+
+interruptMatrix: IRQControllers.ESP32S3_InterruptMatrix @ sysbus 0x600C2000
+
+i2c0: I2C.ESP32S3_I2C @ sysbus 0x60013000
+i2c1: I2C.ESP32S3_I2C @ sysbus 0x60027000
+
+spi2: SPI.ESP32S3_SPI @ sysbus 0x60024000
+spi3: SPI.ESP32S3_SPI @ sysbus 0x60025000
+
+uartSemihosting: UART.SemihostingUart @ cpu
+
+sysbus:
+    init:
+        // EFUSE: chip revision = 0 (ESP32-S3 v0)
+        Tag <0x60007044 4> "EFUSE_RD_MAC_SPI_SYS_3" 0x00000000
+        Tag <0x60007048 4> "EFUSE_RD_MAC_SPI_SYS_4" 0x00000000
+        // EFUSE block: report all zeros (no fuses blown)
+        Tag <0x6000704C 4> "EFUSE_RD_SYS_PART1_0" 0x00000000
+
+        // IO_MUX region
+        Tag <0x60009000 0x100> "IO_MUX"
+
+        // SPI0/SPI1 controller stubs (flash access, not general-purpose SPI)
+        Tag <0x60003000 0x100> "SPI0"
+        Tag <0x60002000 0x100> "SPI1"
+
+        // Timer Group 0 and 1 stubs
+        Tag <0x60015000 0x100> "TIMG0"
+        Tag <0x60016000 0x100> "TIMG1"
+
+        // System Timer stub
+        Tag <0x6001F000 0x100> "SYSTIMER"
+
+        // Sensitive (permission control)
+        Tag <0x600C1000 0x1000> "SENSITIVE"
+
+        // GDMA controller
+        Tag <0x6003F000 0x1000> "GDMA"
+
+        // AES/SHA/RSA accelerator stubs
+        Tag <0x6003A000 0x100> "AES"
+        Tag <0x6003B000 0x100> "SHA"
+        Tag <0x6003C000 0x100> "RSA"
+
+        // USB Serial/JTAG
+        Tag <0x60038000 0x100> "USB_SERIAL_JTAG"

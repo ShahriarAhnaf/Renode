@@ -1,0 +1,39 @@
+using sysbus
+
+# ESP32-S3 boot script for ESP-IDF firmware
+# Usage:
+#   $bin=@/path/to/your/firmware.elf
+#   include @scripts/single-node/esp32s3.resc
+#   start
+
+mach create "esp32s3"
+machine LoadPlatformDescription @platforms/cpus/esp32s3.repl
+
+showAnalyzer uart0
+
+macro reset
+"""
+    sysbus LoadELF $bin
+
+    # The following overrides simulate the state the ROM bootloader
+    # would leave before jumping to the application entry point.
+    # They are required because we load the ELF directly, skipping ROM.
+    #
+    # PS: Architectural reset is 0x1F (INTLEVEL=15, EXCM=1). The ROM
+    # bootloader lowers INTLEVEL and enables WOE before jumping to the
+    # app. We set the post-ROM state directly.
+    cpu PS 0x00040000
+
+    # VECBASE: Architectural reset is 0x40000000 (ROM vectors, set by
+    # the CPU model). Override to IRAM where ESP-IDF places its vector
+    # table. The firmware will also set this via WSR.VECBASE early in boot.
+    cpu VECBASE 0x40370000
+"""
+
+if $(string IsNullOrEmpty $bin)
+    echo "No firmware specified. Set $$bin before running, e.g.:"
+    echo "  $$bin=@/path/to/your/firmware.elf"
+    echo "  include @scripts/single-node/esp32s3.resc"
+else
+    runMacro $reset
+fi
