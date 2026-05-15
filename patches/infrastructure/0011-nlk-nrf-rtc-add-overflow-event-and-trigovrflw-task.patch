@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Mon, 30 Mar 2026 00:00:00 -0700
+Subject: [PATCH] NRF52840_RTC: Add overflow event, TRIGOVRFLW task, and
+ overflow interrupt support
+
+The upstream NRF52840_RTC model has the TriggerOverflow and Overflow
+register enum entries defined but not wired to actual register
+implementations.  The SoftDevice and Zephyr both use:
+
+  - TASKS_TRIGOVRFLW (0x00C): trigger an overflow event
+  - EVENTS_OVRFLW (0x104): overflow event flag
+  - OVRFLW bit in INTENSET/INTENCLR: overflow interrupt enable
+
+Without these, the overflow interrupt never fires and overflow-based
+scheduling fails silently.
+
+This patch wires the existing enum values to functional register
+definitions and adds overflow to the interrupt aggregation logic.
+
+---
+ .../Peripherals/Timers/NRF52840_RTC.cs        | 28 ++++++++++++++++---
+ 1 file changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_RTC.cs b/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_RTC.cs
+index 25c22a936..a71f492dc 100644
+--- a/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_RTC.cs
++++ b/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_RTC.cs
+@@ -1,4 +1,4 @@
+-﻿//
++//
+ // Copyright (c) 2010-2026 Antmicro
+ //
+ // This file is licensed under the MIT License.
+@@ -144,9 +144,21 @@ private void DefineRegisters()
+                     })
+                     .WithReservedBits(1, 31)
+                 },
++                {(long)Register.TriggerOverflow, new DoubleWordRegister(this)
++                    .WithFlag(0, FieldMode.Write, name: "TASKS_TRIGOVRFLW", writeCallback: (_, value) =>
++                    {
++                        if(value)
++                        {
++                            overflowEvent.Value = true;
++                            EventTriggered?.Invoke((uint)Register.Overflow);
++                            UpdateInterrupts();
++                        }
++                    })
++                    .WithReservedBits(1, 31)
++                },
+                 {(long)Register.InterruptEnableSet, new DoubleWordRegister(this)
+                     .WithFlag(0, out tickInterruptEnabled, FieldMode.Set | FieldMode.Read, name: "TICK")
+-                    .WithTaggedFlag("OVRFLW", 1)
++                    .WithFlag(1, out overflowInterruptEnabled, FieldMode.Set | FieldMode.Read, name: "OVRFLW")
+                     .WithReservedBits(2, 14)
+                     .WithFlags(16, numberOfEvents, out compareInterruptEnabled, FieldMode.Set | FieldMode.Read, name: "COMPARE")
+                     .WithChangeCallback((_, __) =>
+@@ -159,7 +171,9 @@ private void DefineRegisters()
+                     .WithFlag(0, name: "TICK",
+                           writeCallback: (_, value) => tickInterruptEnabled.Value &= !value,
+                           valueProviderCallback: _ => tickInterruptEnabled.Value)
+-                    .WithTaggedFlag("OVRFLW", 1)
++                    .WithFlag(1, name: "OVRFLW",
++                          writeCallback: (_, value) => overflowInterruptEnabled.Value &= !value,
++                          valueProviderCallback: _ => overflowInterruptEnabled.Value)
+                     .WithReservedBits(2, 14)
+                     .WithFlags(16, numberOfEvents, name: "COMPARE",
+                           writeCallback: (j, _, value) => compareInterruptEnabled[j].Value &= !value,
+@@ -210,6 +224,11 @@ private void DefineRegisters()
+                    .WithFlag(0, out tickEvent, name: "EVENTS_TICK")
+                    .WithReservedBits(1, 31)
+                    .WithWriteCallback((_, __) => UpdateInterrupts())
++                },
++                {(long)Register.Overflow, new DoubleWordRegister(this)
++                   .WithFlag(0, out overflowEvent, name: "EVENTS_OVRFLW")
++                   .WithReservedBits(1, 31)
++                   .WithWriteCallback((_, __) => UpdateInterrupts())
+                 }
+             };
+ 
+@@ -258,6 +277,7 @@ private void UpdateInterrupts()
+             }
+ 
+             flag |= tickEvent.Value && tickInterruptEnabled.Value;
++            flag |= overflowEvent.Value && overflowInterruptEnabled.Value;
+             IRQ.Set(flag);
+         }
+ 
+@@ -265,6 +285,8 @@ private void UpdateInterrupts()
+         private IValueRegisterField prescaler;
+         private IFlagRegisterField tickInterruptEnabled;
+         private IFlagRegisterField tickEvent;
++        private IFlagRegisterField overflowInterruptEnabled;
++        private IFlagRegisterField overflowEvent;
+ 
+         private DoubleWordRegisterCollection registers;
+         private IFlagRegisterField[] compareEventEnabled;
+-- 
+2.39.5
+

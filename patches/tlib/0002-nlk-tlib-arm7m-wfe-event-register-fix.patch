@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Thu, 26 Mar 2026 00:00:00 -0700
+Subject: [PATCH] arm: Implement ARMv7-M event register for WFE
+
+Per ARMv7-M ARM B1.4.2, the event register must be set on:
+  - Exception entry
+  - Exception return (including secure return)
+
+When WFE executes and the event register is already set, the
+instruction must clear it and return immediately without suspending
+the CPU.  Without this, firmware spin-loops using WFE (e.g. Nordic
+SoftDevice S140 BLE stack) hang indefinitely because exception
+entry/return never primes the event register, so the next WFE always
+suspends even though work is available.
+
+The sev_pending field and is_cpu_event_pending() infrastructure
+already exist in cpu.h; this patch wires the behavioral hooks.
+---
+ arch/arm/helper.c    | 11 +++++++++++
+ arch/arm/op_helper.c |  6 ++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/arch/arm/helper.c b/arch/arm/helper.c
+index 98f77e892..1b75d4080 100644
+--- a/arch/arm/helper.c
++++ b/arch/arm/helper.c
+@@ -1139,6 +1139,10 @@ void do_v7m_exception_exit(CPUState *env)
+     } else {
+         env->v7m.handler_mode = true;
+     }
++
++    // ARMv7-M ARM B1.4.2: exception return sets the event register,
++    // so a subsequent WFE will fall through immediately.
++    env->sev_pending = 1;
+ }
+ 
+ void do_v7m_secure_return(CPUState *env)
+@@ -1155,6 +1159,10 @@ void do_v7m_secure_return(CPUState *env)
+     env->regs[15] = v7m_pop(env) & ~1;
+ 
+     tlib_printf(LOG_LEVEL_NOISY, "Secure return to 0x%08" PRIx32 ", xpsr: 0x%08" PRIx32, env->regs[15], xpsr_read(env));
++
++    // ARMv7-M ARM B1.4.2: exception return sets the event register,
++    // so a subsequent WFE will fall through immediately.
++    env->sev_pending = 1;
+ }
+ 
+ static inline bool lsp_store_helper(CPUState *env, uint32_t *address, uint32_t val)
+@@ -1491,6 +1499,9 @@ static void do_interrupt_v7m(CPUState *env)
+         do_interrupt_v7m(env);
+     }
+ 
++    // ARMv7-M ARM B1.4.2: exception entry sets the event register.
++    env->sev_pending = 1;
++
+     arm_announce_stack_change();
+ }
+ #endif
+diff --git a/arch/arm/op_helper.c b/arch/arm/op_helper.c
+index eb52df923..4fb984dcc 100644
+--- a/arch/arm/op_helper.c
++++ b/arch/arm/op_helper.c
+@@ -207,6 +207,12 @@ void HELPER(wfi)(void)
+ 
+ void HELPER(wfe)(void)
+ {
++    // ARMv7-M ARM B1.4.2: if the event register is set, WFE clears it
++    // and returns immediately without suspending execution.
++    if(env->sev_pending) {
++        env->sev_pending = 0;
++        return;
++    }
+     env->exception_index = EXCP_WFI;
+     env->wfe = 1;
+ }

@@ -1,0 +1,205 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Tue, 25 Mar 2026 00:00:00 -0700
+Subject: [PATCH] NRF52840_Timer: Add shortcuts, BitMode, capture fix, and
+ edge-triggered IRQ
+
+The upstream C# timer peripheral was missing the Shortcuts register
+(COMPARE_CLEAR / COMPARE_STOP), BitMode support, and had a capture
+task that unnecessarily cleared interrupt state.
+
+Moving these from a Python peripheral overlay into the C# model
+eliminates a Python-to-C# interop round-trip on every compare event
+and every MMIO access to the Shortcuts/BitMode registers.  For
+timer-heavy workloads (e.g. Zephyr kernel ticks at 32 kHz, BLE
+connection-event scheduling) this removes thousands of managed
+call transitions per second, reducing simulation overhead measurably.
+
+Additionally, fix UpdateInterrupts() to use edge-triggered IRQ
+signalling matching real nRF52840 hardware behaviour.  The previous
+level-triggered IRQ.Set(flag) held the NVIC input high, causing
+the ISR to re-enter immediately after firmware cleared the event
+register and returned.  Now UpdateInterrupts() tracks the previous
+IRQ state and calls IRQ.Blink() only on a 0-to-1 transition.
+
+Specific changes:
+
+  - Shortcuts register (0x200): implement COMPARE_CLEAR[0..N] and
+    COMPARE_STOP[0..N] with in-callback clear/stop on compare match.
+  - BitMode register (0x508): 8/16/24/32-bit counter width support
+    via GetBitModeMask(), applied to compare writes, capture reads,
+    and the Compare0..N value provider.
+  - Capture task: snapshot counter value directly instead of routing
+    through SetCompare(), which had the side effect of clearing the
+    event flag and updating interrupts.
+  - Edge-triggered IRQ: pulse via IRQ.Blink() on rising edge only.
+---
+ .../Timers/NRF52840_Timer.cs                  | 90 ++++++++++++++++---
+ 1 file changed, 80 insertions(+), 10 deletions(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Timer.cs b/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Timer.cs
+index 1fc00e9cd..cb53669bd 100644
+--- a/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Timer.cs
++++ b/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Timer.cs
+@@ -1,4 +1,4 @@
+-﻿//
++//
+ // Copyright (c) 2010-2025 Antmicro
+ //
+ // This file is licensed under the MIT License.
+@@ -27,6 +27,8 @@
+             this.numberOfEvents = numberOfEvents;
+ 
+             this.eventCompareEnabled = new IFlagRegisterField[numberOfEvents];
++            this.shortClearEnabled = new bool[numberOfEvents];
++            this.shortStopEnabled = new bool[numberOfEvents];
+             innerTimers = new ComparingTimer[numberOfEvents];
+             for(var i = 0u; i < innerTimers.Length; i++)
+             {
+@@ -37,6 +39,23 @@
+                     this.Log(LogLevel.Noisy, "Compare Reached on CC{0} is {1}", j, innerTimers[j].Compare);
+                     eventCompareEnabled[j].Value = true;
+                     EventTriggered?.Invoke((uint)Register.Compare0EventPending + 0x4u * j);
++
++                    if(shortClearEnabled[j])
++                    {
++                        foreach(var timer in innerTimers)
++                        {
++                            timer.Value = 0;
++                        }
++                    }
++                    if(shortStopEnabled[j])
++                    {
++                        timerRunning = false;
++                        foreach(var timer in innerTimers)
++                        {
++                            timer.Enabled = false;
++                        }
++                    }
++
+                     UpdateInterrupts();
+                 };
+             }
+@@ -53,6 +72,7 @@
+                 timer.Reset();
+             }
+ 
++            previousIrqState = false;
+             IRQ.Unset();
+         }
+ 
+@@ -147,7 +167,7 @@
+                 register
+                     .WithFlag(0, FieldMode.Write, name: "TASKS_CAPTURE", writeCallback: (_, __) =>
+                     {
+-                        SetCompare(idx, innerTimers[idx].Value);
++                        innerTimers[idx].Compare = innerTimers[idx].Value & GetBitModeMask();
+                     })
+                     .WithReservedBits(1, 31);
+             });
+@@ -162,6 +182,17 @@
+                     .WithReservedBits(1, 31);
+             });
+ 
++            Register.Shortcuts.Define(this)
++                .WithFlags(0, numberOfEvents, name: "COMPARE_CLEAR",
++                    writeCallback: (i, _, value) => { shortClearEnabled[i] = value; },
++                    valueProviderCallback: (i, _) => shortClearEnabled[i])
++                .WithReservedBits(numberOfEvents, 8 - numberOfEvents)
++                .WithFlags(8, numberOfEvents, name: "COMPARE_STOP",
++                    writeCallback: (i, _, value) => { shortStopEnabled[i] = value; },
++                    valueProviderCallback: (i, _) => shortStopEnabled[i])
++                .WithReservedBits(8 + numberOfEvents, 32 - 8 - numberOfEvents)
++            ;
++
+             Register.InterruptEnableSet.Define(this)
+                 .WithReservedBits(0, 16)
+                 .WithFlags(16, numberOfEvents, out eventCompareInterruptEnabled, FieldMode.Set | FieldMode.Read, name: "COMPARE")
+@@ -192,6 +223,11 @@
+                 })
+             ;
+ 
++            Register.BitMode.Define(this)
++                .WithEnumField(0, 2, out bitMode, name: "BITMODE")
++                .WithReservedBits(2, 30)
++            ;
++
+             Register.Prescaler.Define(this)
+                 .WithValueField(0, 4, out prescaler, name: "PRESCALER", writeCallback: (_, value) =>
+                 {
+@@ -212,16 +248,27 @@
+                     },
+                     valueProviderCallback: _ =>
+                     {
+-                        return (uint)innerTimers[idx].Compare;
++                        return (uint)(innerTimers[idx].Compare & GetBitModeMask());
+                     });
+             });
+         }
+ 
++        private ulong GetBitModeMask()
++        {
++            switch(bitMode.Value)
++            {
++                case BitModeValue.Bit8: return 0xFF;
++                case BitModeValue.Bit16: return 0xFFFF;
++                case BitModeValue.Bit24: return 0xFFFFFF;
++                default: return 0xFFFFFFFF;
++            }
++        }
++
+         private void SetCompare(int idx, ulong value)
+         {
+             eventCompareEnabled[idx].Value = false;
+             UpdateInterrupts();
+-            innerTimers[idx].Compare = value;
++            innerTimers[idx].Compare = value & GetBitModeMask();
+         }
+ 
+         private void UpdateInterrupts()
+@@ -233,15 +280,27 @@
+                 flag |= eventCompareInterruptEnabled[i].Value && eventCompareEnabled[i].Value;
+             }
+ 
+-            IRQ.Set(flag);
++            if(flag && !previousIrqState)
++            {
++                IRQ.Blink();
++            }
++            else if(!flag && previousIrqState)
++            {
++                IRQ.Unset();
++            }
++            previousIrqState = flag;
+         }
+ 
+         private IFlagRegisterField[] eventCompareInterruptEnabled;
+         private IValueRegisterField prescaler;
+         private IEnumRegisterField<Mode> mode;
++        private IEnumRegisterField<BitModeValue> bitMode;
++        private bool previousIrqState;
+         private bool timerRunning;
+ 
+         private readonly IFlagRegisterField[] eventCompareEnabled;
++        private readonly bool[] shortClearEnabled;
++        private readonly bool[] shortStopEnabled;
+ 
+         private readonly ComparingTimer[] innerTimers;
+ 
+@@ -256,6 +315,14 @@
+             LowPowerCounter
+         }
+ 
++        private enum BitModeValue
++        {
++            Bit16 = 0,
++            Bit8 = 1,
++            Bit24 = 2,
++            Bit32 = 3
++        }
++
+         private enum Register : long
+         {
+             Start = 0x000,
+-- 
+2.50.1 (Apple Git-155)

@@ -1,0 +1,290 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Tue, 25 Mar 2026 00:00:00 -0700
+Subject: [PATCH] NRF_CLOCK: Add calibration timer, run-status, missing
+ registers, edge-triggered IRQ, and warm-reset clock fix
+
+The upstream NRF_CLOCK stub is missing several registers and
+behaviours required by Zephyr's nRF clock-control driver and
+SoftDevice BLE stacks:
+
+  - HFCLK/LFCLK start-triggered status registers (0x408, 0x414)
+  - Calibration timer timeout event (EVENTS_CTTO at 0x110)
+  - Calibration timer start/stop events (0x128, 0x12C)
+  - CTTO interrupt enable/disable (bit 4 in INTENSET/INTENCLR)
+  - LFCLK source copy register (LFCLKSRCCOPY at 0x41C)
+  - Calibration timer interval register (CTIV at 0x538)
+  - HFCLKRun / LFCLKRun (0x400, 0x410) — clock running status
+  - HFCLKAlwaysRun (0x51C) — always-run control
+  - RamPowerControl (0xC34) and RamPowerSet0 (0x914) — RAM power
+  - POWER.RAM[0..8].POWERSET registers (0xE00-0xE34)
+  - Reserved register at 0x108
+  - Fix EVENTS_DONE name on CalibrationOfLFRCCompleted
+  - Promote lfclkSource to a class field so LFCLKSRCCOPY can read it
+
+Fix Update() to use edge-triggered IRQ signalling: the real nRF52840
+CLOCK fires events as one-shot pulses.  The previous level-triggered
+IRQ.Set(irq) held the NVIC input high, causing the ISR to re-enter
+immediately after firmware cleared the event register and returned.
+Now Update() tracks the previous IRQ state and calls IRQ.Blink() only
+on a 0→1 transition, letting the NVIC latch Pending without holding
+the line asserted.
+
+Fix Reset() to keep hfclkStarted=true and lfclkStarted=true after
+reset.  On real nRF52840 hardware the internal HF RC oscillator
+(HFINT) is always available after reset — the CPU never lacks a clock
+source.  Renode doesn't model HFINT vs HFXO, so clearing hfclkStarted
+makes the status register report "no HF clock" which is worse than
+real HW.  This caused SoftDevice warm-reset paths that poll HFCLKSTAT
+before re-issuing TASKS_HFCLKSTART to spin indefinitely, producing a
+SYSRESETREQ boot loop.
+---
+ .../Miscellaneous/NRF_CLOCK.cs                | 163 +++++++++++++++---
+ 1 file changed, 141 insertions(+), 22 deletions(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF_CLOCK.cs b/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF_CLOCK.cs
+index 273e56556..7eea6113e 100644
+--- a/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF_CLOCK.cs
++++ b/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF_CLOCK.cs
+@@ -38,8 +38,18 @@ public NRF_CLOCK(IMachine machine) : base(machine)
+         public override void Reset()
+         {
+             base.Reset();
+-            lfclkStarted = false;
+-            hfclkStarted = false;
++            // On real nRF52840, the internal HF RC oscillator (HFINT) is always
++            // available after reset — the CPU never lacks a clock source.  Renode
++            // doesn't model HFINT vs HFXO, so clearing hfclkStarted makes the
++            // status register report "no HF clock" which is *worse* than real HW.
++            // Keep both clocks "started" so SoftDevice warm-reset paths that poll
++            // status before re-issuing TASKS_xCLKSTART don't spin or fault.
++            // Event flags are still cleared by base.Reset() so firmware will see
++            // the expected EVENTS_xCLKSTARTED=0 and can re-trigger them normally.
++            hfclkStarted = true;
++            lfclkStarted = true;
++            previousIrqState = false;
++            IRQ.Unset();
+             Update();
+         }
+ 
+@@ -52,9 +62,22 @@ private void Update()
+             bool irq = (lfclkEventGenerated.Value && lfclkStartedEventEnabled.Value)
+                     || (lfclkCalibrationEventGenerated.Value && lfclkCalibrationEventEnabled.Value)
+                     || (hfclkEventGenerated.Value && hfclkStartedEventEnabled.Value)
+-                    || (hfclk192mStartedEventEnabled.Value && hfclk192mStarted);
+-            this.Log(LogLevel.Noisy, "Setting IRQ: {0}", irq);
+-            IRQ.Set(irq);
++                    || (hfclk192mStartedEventEnabled.Value && hfclk192mStarted)
++                    || (calibrationTimerTimeoutEvent.Value && calibrationTimerTimeoutEventEnabled.Value);
++            this.Log(LogLevel.Noisy, "IRQ condition: {0} (prev {1})", irq, previousIrqState);
++            if(irq && !previousIrqState)
++            {
++                // nRF52840 CLOCK events are one-shot: pulse the IRQ line so the
++                // NVIC latches Pending, then release.  Firmware clears the event
++                // register; we must not hold the line high or the NVIC will
++                // re-enter the ISR immediately after return.
++                IRQ.Blink();
++            }
++            else if(!irq && previousIrqState)
++            {
++                IRQ.Unset();
++            }
++            previousIrqState = irq;
+         }
+ 
+         private void DefineRegisters()
+@@ -64,6 +87,14 @@ private void DefineRegisters()
+                 .WithReservedBits(1, 31)
+                 .WithWriteCallback((_, __) => Update());
+ 
++            Registers.HFCLKStartTriggered.Define(this)
++                .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => hfclkStarted, name: "TRIGGERED")
++                .WithReservedBits(1, 31);
++
++            Registers.LFCLKStartTriggered.Define(this)
++                .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => lfclkStarted, name: "TRIGGERED")
++                .WithReservedBits(1, 31);
++
+             Registers.LFCLKStarted.Define(this)
+                 .WithFlag(0, out lfclkEventGenerated, name: "EVENTS_LFCLKSTARTED")
+                 .WithReservedBits(1, 31)
+@@ -105,23 +136,46 @@ private void DefineRegisters()
+                 .WithReservedBits(1, 31);
+ 
+             Registers.CalibrationOfLFRCCompleted.Define(this)
+-                .WithFlag(0, out lfclkCalibrationEventGenerated, name: "EVENTS_HFCLKSTARTED")
++                .WithFlag(0, out lfclkCalibrationEventGenerated, name: "EVENTS_DONE")
+                 .WithReservedBits(1, 31)
+                 .WithWriteCallback((_, __) => Update());
+ 
++            Registers.CalibrationTimerTimeout.Define(this)
++                .WithFlag(0, out calibrationTimerTimeoutEvent, name: "EVENTS_CTTO")
++                .WithReservedBits(1, 31)
++                .WithWriteCallback((_, __) => Update());
++
++            Registers.CalibrationTimerStarted.Define(this)
++                .WithFlag(0, name: "EVENTS_CTSTARTED")
++                .WithReservedBits(1, 31);
++
++            Registers.CalibrationTimerStopped.Define(this)
++                .WithFlag(0, name: "EVENTS_CTSTOPPED")
++                .WithReservedBits(1, 31);
++
+             Registers.StartLFRCCallibration.Define(this)
+                 .WithFlag(0, FieldMode.Write, writeCallback: (_, value) =>
+                 {
+                     lfclkCalibrationEventGenerated.Value = true;
+                     Update();
+-                }).WithReservedBits(1, 31);
++                }, name: "TASKS_CAL")
++                .WithReservedBits(1, 31);
++
++            Registers.StartCallibrationTimer.Define(this)
++                .WithFlag(0, FieldMode.Write, writeCallback: (_, value) =>
++                {
++                    calibrationTimerTimeoutEvent.Value = true;
++                    Update();
++                }, name: "TASKS_CTSTART")
++                .WithReservedBits(1, 31);
+ 
+             Registers.StopCallibrationTimer.Define(this)
+                 .WithFlag(0, FieldMode.Write, writeCallback: (_, value) =>
+                 {
+-                    lfclkCalibrationEventGenerated.Value = false;
++                    calibrationTimerTimeoutEvent.Value = false;
+                     Update();
+-                }).WithReservedBits(1, 31);
++                }, name: "TASKS_CTSTOP")
++                .WithReservedBits(1, 31);
+ 
+             Registers.PowerUsbRegisterStatus.Define(this)
+                 .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => true, name: "VBUSDETECT")
+@@ -154,7 +208,7 @@ private void DefineRegisters()
+                 .WithFlag(1, out lfclkStartedEventEnabled, FieldMode.Read | FieldMode.Set, name: "LFCLKSTARTED")
+                 .WithReservedBits(2, 1)
+                 .WithFlag(3, out lfclkCalibrationEventEnabled, FieldMode.Read | FieldMode.Set, name: "DONE")
+-                .WithTaggedFlag("CTTO", 4)
++                .WithFlag(4, out calibrationTimerTimeoutEventEnabled, FieldMode.Read | FieldMode.Set, name: "CTTO")
+                 .WithReservedBits(5, 2)
+                 .WithTaggedFlag("DONE (nRF5340)", 7) // nRF5340, but also nRF52840 USB
+                 .WithFlag(8, out hfclk192mAudioStartedEventEnabled, FieldMode.Read | FieldMode.Set, name: "HFCLKAUDIOSTARTED") // nRF5340, but also nRF52840 with USB
+@@ -175,7 +229,9 @@ private void DefineRegisters()
+                 .WithFlag(3,
+                     writeCallback: (_, value) => lfclkCalibrationEventEnabled.Value &= !value,
+                     valueProviderCallback: _ => lfclkCalibrationEventEnabled.Value, name: "DONE")
+-                .WithTaggedFlag("CTTO", 4)
++                .WithFlag(4,
++                    writeCallback: (_, value) => calibrationTimerTimeoutEventEnabled.Value &= !value,
++                    valueProviderCallback: _ => calibrationTimerTimeoutEventEnabled.Value, name: "CTTO")
+                 .WithReservedBits(5, 2)
+                 .WithTaggedFlag("DONE (nRF540)", 7) // nRF5340, but also nRF52840 USB
+                 .WithFlag(8,
+@@ -190,12 +246,20 @@ private void DefineRegisters()
+                 .WithWriteCallback((_, __) => Update());
+ 
+             Registers.LFCLKClockSource.Define(this)
+-                .WithValueField(0, 2, out var lfclkSource, name: "SRC")
++                .WithValueField(0, 2, out lfclkSource, name: "SRC")
+                 .WithReservedBits(2, 14)
+                 .WithFlag(16, name: "BYPASS")
+                 .WithFlag(17, name: "EXTERNAL")
+                 .WithReservedBits(18, 14);
+ 
++            Registers.LFCLKClockSourceCopy.Define(this)
++                .WithValueField(0, 2, FieldMode.Read, valueProviderCallback: _ => lfclkSource.Value, name: "SRC")
++                .WithReservedBits(2, 30);
++
++            Registers.CallibrationTimerInterval.Define(this)
++                .WithValueField(0, 7, name: "CTIV")
++                .WithReservedBits(7, 25);
++
+             Registers.HFCLKStatus.Define(this)
+                 // true in the first bit indicates that hfclk is started. Not sure if it's possible to return true in STATE and false in SRC
+                 .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => hfclkStarted, name: "SRC")
+@@ -212,8 +276,39 @@ private void DefineRegisters()
+             Registers.PowerUSBMainRegisterStatus.Define(this)
+                 .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => true, name: "MAINREGSTATUS")
+                 .WithReservedBits(1, 31);
++
++            Registers.Reserved0x108.Define(this)
++                .WithValueField(0, 32, name: "RESERVED_0x108");
++
++            Registers.HFCLKRun.Define(this)
++                .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => hfclkStarted, name: "STATUS")
++                .WithReservedBits(1, 31);
++
++            Registers.LFCLKRun.Define(this)
++                .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => lfclkStarted, name: "STATUS")
++                .WithReservedBits(1, 31);
++
++            Registers.HFCLKAlwaysRun.Define(this)
++                .WithValueField(0, 32, name: "ALWAYSRUN");
++
++            Registers.RamPowerControl.Define(this)
++                .WithValueField(0, 32, name: "RAM_POWER_CONTROL");
++
++            Registers.RamPowerSet0.Define(this)
++                .WithValueField(0, 32, name: "RAM_POWERSET");
++
++            // POWER.RAM[0..8].POWERSET registers — SoftDevice writes these
++            // during sd_softdevice_enable() to configure RAM power sections.
++            // Offsets 0xE00-0xE34 (step 4) in the CLOCK+POWER combined block.
++            for(int i = 0; i <= 13; i++)
++            {
++                var offset = 0xE00 + i * 4;
++                ((Registers)offset).Define(this)
++                    .WithValueField(0, 32, name: $"RAM_POWERSET_{i}");
++            }
+         }
+ 
++        private bool previousIrqState;
+         private bool lfclkStarted;
+         private bool hfclkStarted;
+         private bool hfclk192mStarted;
+@@ -225,6 +320,9 @@ private void DefineRegisters()
+         private IFlagRegisterField hfclk192mAudioStartedEventEnabled;
+         private IFlagRegisterField lfclkCalibrationEventEnabled;
+         private IFlagRegisterField lfclkCalibrationEventGenerated;
++        private IFlagRegisterField calibrationTimerTimeoutEvent;
++        private IFlagRegisterField calibrationTimerTimeoutEventEnabled;
++        private IValueRegisterField lfclkSource;
+ 
+         private enum Registers
+         {
+@@ -238,6 +336,7 @@ private enum Registers
+             StartHfClock192M = 0x20, // nRF5340
+             HFXOCrystalOscillatorStarted = 0x100,
+             LFCLKStarted = 0x104,
++            Reserved0x108 = 0x108,
+             CalibrationOfLFRCCompleted = 0x10C,
+             CalibrationTimerTimeout = 0x110,
+             PowerUSBDetectedEvent = 0x11C, // POWER peripheral
+@@ -247,18 +346,23 @@ private enum Registers
+             CalibrationTimerStopped = 0x12C,
+             EnableInterrupt = 0x304,
+             DisableInterrupt = 0x308,
++            HFCLKRun = 0x400,
+             HFCLKStartTriggered = 0x408,
+             HFCLKStatus = 0x40C,
++            LFCLKRun = 0x410,
+             LFCLKStartTriggered = 0x414,
+             LFCLKStatus = 0x418,
+             LFCLKClockSourceCopy = 0x41C,
+             PowerUsbRegisterStatus = 0x438,
+             LFCLKClockSource = 0x518,
++            HFCLKAlwaysRun = 0x51C,
+             HFXODebounceTime = 0x528,
+             CallibrationTimerInterval = 0x538,
+             TraceConfig = 0x55C,
+             LFRCModeConfiguration = 0x5B4,
+-            PowerUSBMainRegisterStatus = 0x640
++            PowerUSBMainRegisterStatus = 0x640,
++            RamPowerSet0 = 0x914,
++            RamPowerControl = 0xC34
+         }
+     }
+-}
+\ No newline at end of file
++}
+-- 
+2.50.1 (Apple Git-155)

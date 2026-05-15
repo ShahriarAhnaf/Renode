@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Thu, 26 Mar 2026 00:00:00 -0700
+Subject: [PATCH] NRF52840_Watchdog: Implement CONFIG SLEEP/HALT fields
+
+The upstream NRF52840_Watchdog CONFIG register was a stub that logged
+warnings on read/write.  Zephyr's watchdog driver writes CONFIG to
+control WDT behavior during sleep and debug-halt.
+
+Replace the stub with proper flag fields (configSleep, configHalt)
+that:
+  - Accept writes only when the WDT is not yet started (matching
+    real hardware write-once-after-reset behavior)
+  - Set the correct reset value (0x1: run during sleep by default)
+  - Log a warning if firmware attempts to change CONFIG while running
+---
+ .../Peripherals/Timers/NRF52840_Watchdog.cs   | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Watchdog.cs b/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Watchdog.cs
+index 5b42e51fb..67ec12d54 100644
+--- a/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Watchdog.cs
++++ b/src/Emulator/Peripherals/Peripherals/Timers/NRF52840_Watchdog.cs
+@@ -151,13 +151,27 @@ private void DefineRegisters()
+                         valueProviderCallback: (j, _) => requestRegisterEnabled[j])
+                     .WithReservedBits(NumberOfRegisters, 32 - NumberOfRegisters)
+                 },
+-                {(long)Register.Config, new DoubleWordRegister(this)
+-                    .WithFlag(0, name: "SLEEP")
++                {(long)Register.Config, new DoubleWordRegister(this, 0x1)
++                    .WithFlag(0, out configSleep, name: "SLEEP",
++                        writeCallback: (_, value) =>
++                        {
++                            if(Enabled)
++                            {
++                                this.Log(LogLevel.Warning, "Tried to change CONFIG while watchdog is running, ignored");
++                                return;
++                            }
++                        })
+                     .WithReservedBits(1, 2)
+-                    .WithFlag(3, name: "HALT")
++                    .WithFlag(3, out configHalt, name: "HALT",
++                        writeCallback: (_, value) =>
++                        {
++                            if(Enabled)
++                            {
++                                this.Log(LogLevel.Warning, "Tried to change CONFIG while watchdog is running, ignored");
++                                return;
++                            }
++                        })
+                     .WithReservedBits(4, 28)
+-                    .WithWriteCallback((_, value) => this.Log(LogLevel.Warning, $"Write to a dummy implementation of the Config register, value: 0x{value:X}"))
+-                    .WithReadCallback((_, value) => this.Log(LogLevel.Warning, $"Read from a dummy implementation of the Config register, returned: 0x{value:X}"))
+                 }
+             };
+ 
+@@ -232,6 +246,8 @@ private void Reload()
+ 
+         private DoubleWordRegisterCollection registers;
+         private IFlagRegisterField eventTimeoutEnabled;
++        private IFlagRegisterField configSleep;
++        private IFlagRegisterField configHalt;
+         private IFlagRegisterField[] requestRegisterStatus;
+         private readonly bool[] requestRegisterEnabled;
+ 

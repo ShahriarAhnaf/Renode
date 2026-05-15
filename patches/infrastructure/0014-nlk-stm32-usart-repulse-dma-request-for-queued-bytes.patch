@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Mon, 30 Mar 2026 00:00:00 -0700
+Subject: [PATCH] STM32F7_USART: Re-pulse DMA request when bytes remain after
+ RDR read
+
+The ReceiveDmaRequest GPIO is pulsed once when BufferState transitions
+from Empty to Ready (first byte received).  If additional bytes arrive
+before the DMA reads the first, the BufferState setter early-returns
+(already Ready) and the DMA request is never re-asserted.
+
+The DMA model transfers one data unit per trigger in peripheral-to-
+memory mode.  Without re-pulsing, only the first byte of a multi-byte
+frame is DMA-transferred; the remaining bytes sit in the USART queue
+and HAL_UART_RxCpltCallback never fires.
+
+After the DMA reads a byte via the RDR register, this patch checks if
+more bytes remain in the queue and, if DMA receive is enabled, toggles
+ReceiveDmaRequest low then high to trigger the next single-byte DMA
+transfer.  The recursion is naturally bounded by the queue depth and
+the DMA's data count register.
+
+---
+ .../Peripherals/UART/STM32F7_USART.cs        | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/UART/STM32F7_USART.cs b/src/Emulator/Peripherals/Peripherals/UART/STM32F7_USART.cs
+index d069f5837..b6f62aed9 100644
+--- a/src/Emulator/Peripherals/Peripherals/UART/STM32F7_USART.cs
++++ b/src/Emulator/Peripherals/Peripherals/UART/STM32F7_USART.cs
+@@ -387,6 +387,11 @@ private uint HandleReceiveData()
+             {
+                 this.Log(LogLevel.Warning, "No characters in queue.");
+             }
++            if(Count > 0 && receiveDmaEnabled.Value)
++            {
++                ReceiveDmaRequest.Set(false);
++                ReceiveDmaRequest.Set(true);
++            }
+             return result;
+         }
+ 
+-- 
+2.39.5
+

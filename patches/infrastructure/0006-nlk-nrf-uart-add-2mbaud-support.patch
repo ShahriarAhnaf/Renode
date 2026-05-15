@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Thu, 26 Mar 2026 00:00:00 -0700
+Subject: [PATCH] NRF52840_UART: Add 2 Mbaud support
+
+The upstream NRF52840_UART baudrate enum tops out at 1 Mbaud.
+The nRF52840 hardware supports 2 Mbaud (register value 0x20000000)
+which is used by some firmware configurations.  Add the missing
+enum entry and its mapping in GetBaudRate().
+---
+ .../Peripherals/UART/NRF52840_UART.cs         | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/UART/NRF52840_UART.cs b/src/Emulator/Peripherals/Peripherals/UART/NRF52840_UART.cs
+index 85af09058..53dc91f0e 100644
+--- a/src/Emulator/Peripherals/Peripherals/UART/NRF52840_UART.cs
++++ b/src/Emulator/Peripherals/Peripherals/UART/NRF52840_UART.cs
+@@ -401,6 +401,7 @@ private uint GetBaudRate(uint value)
+             case Baudrate.Baud460800: return 460800;
+             case Baudrate.Baud921600: return 921600;
+             case Baudrate.Baud1M: return 1000000;
++            case Baudrate.Baud2M: return 2000000;
+             default: return 0;
+             }
+         }
+@@ -501,7 +502,8 @@ private enum Baudrate : long
+             Baud250000 = 0x04000000,
+             Baud460800 = 0x075F7000,
+             Baud921600 = 0x0EBED000,
+-            Baud1M = 0x10000000
++            Baud1M = 0x10000000,
++            Baud2M = 0x20000000
+         }
+ 
+         private enum ParityConfig

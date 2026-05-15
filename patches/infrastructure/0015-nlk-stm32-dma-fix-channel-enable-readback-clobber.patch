@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Mon, 30 Mar 2026 00:00:00 -0700
+Subject: [PATCH] STM32G0DMA: Remove valueProviderCallback that clobbers
+ channel enable
+
+The EN bit in the channel configuration register (CCR) had a
+valueProviderCallback that always returned false. Since Renode's
+register framework applies valueProviderCallback by mutating
+UnderlyingValue during ReadInner(), any MMIO read of CCR (including
+firmware read-modify-write sequences) permanently cleared the stored
+EN bit. This caused channelEnable.Value to return false, making
+TryTriggerTransfer() reject all peripheral DMA requests.
+
+Remove the valueProviderCallback so the EN flag retains its
+firmware-written state. Peripheral-to-memory DMA channels (e.g.
+USART RX) now stay enabled and accept GPIO-triggered transfers.
+
+---
+ .../Peripherals/DMA/STM32G0DMA.cs             | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/DMA/STM32G0DMA.cs b/src/Emulator/Peripherals/Peripherals/DMA/STM32G0DMA.cs
+index 00f7aac79..4e62e2628 100644
+--- a/src/Emulator/Peripherals/Peripherals/DMA/STM32G0DMA.cs
++++ b/src/Emulator/Peripherals/Peripherals/DMA/STM32G0DMA.cs
+@@ -214,7 +214,7 @@ public Channel(STM32G0DMA parent, int number)
+                                 DoTransfer();
+                             }
+                         },
+-                        valueProviderCallback: _ => false, name: "Channel enable (EN)")
++                        name: "Channel enable (EN)")
+                     .WithFlag(1, out transferCompleteInterruptEnable, name: "Transfer complete interrupt enable (TCIE)")
+                     .WithFlag(2, out halfTransferInterruptEnable, name: "Half transfer interrupt enable (HTIE)")
+                     .WithTag("Transfer error interrupt enable (TEIE)", 3, 1)
+-- 
+2.39.5
+

@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Mon, 30 Mar 2026 00:00:00 -0700
+Subject: [PATCH] NRF52840_PPI: Make event-to-task propagation synchronous
+
+The upstream PPI model defers task writes via
+ExecuteInNearestSyncedState(), which queues them for the next quantum
+boundary sync phase.  This introduces 1-2 quantum delays for what is
+a zero-cycle combinational path on real hardware.
+
+For the nRF SoftDevice's radio scheduler, the critical chain is:
+
+  RTC0 COMPARE -> PPI -> TIMER0 Start + RADIO TxEn
+
+With deferred propagation, the CPU can observe stale RADIO/TIMER0
+state for up to 2 full quanta after the RTC event fires.  At quantum
+sizes > 1us, this causes the SoftDevice to miss its timing windows
+and enter error recovery (SVCall loop).
+
+Making the sysbus writes synchronous is safe because PPI callbacks
+fire from ClockSource timer handlers at quantum boundaries, which is
+the same context used for all peripheral MMIO.  This decouples
+correctness from quantum size, matching real hardware behavior.
+
+---
+ .../Miscellaneous/NRF52840_PPI.cs             | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF52840_PPI.cs b/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF52840_PPI.cs
+index 0ac366307..ea9e0901a 100644
+--- a/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF52840_PPI.cs
++++ b/src/Emulator/Peripherals/Peripherals/Miscellaneous/NRF52840_PPI.cs
+@@ -254,7 +254,7 @@ private void EventReceived(int id, uint offset)
+             if(taskEndpoint[id] != 0)
+             {
+                 this.Log(LogLevel.Noisy, "Received an event on channel {0} from 0x{1:X}. Triggering task at 0x{2:X}", id, eventEndpoint[id], taskEndpoint[id]);
+-                machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => sysbus.WriteDoubleWord(taskEndpoint[id], 1));
++                sysbus.WriteDoubleWord(taskEndpoint[id], 1);
+             }
+             else
+             {
+@@ -263,7 +263,7 @@ private void EventReceived(int id, uint offset)
+             if(forkEndpoint[id] != 0)
+             {
+                 this.Log(LogLevel.Noisy, "Received an event on channel {0} from 0x{1:X}. Triggering fork task at 0x{2:X}", id, eventEndpoint[id], forkEndpoint[id]);
+-                machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => sysbus.WriteDoubleWord(forkEndpoint[id], 1));
++                sysbus.WriteDoubleWord(forkEndpoint[id], 1);
+             }
+         }
+ 
+-- 
+2.39.5
+

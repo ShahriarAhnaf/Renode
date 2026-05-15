@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ahnaf Shahriar <ahnaf.shahriar@neuralink.com>
+Date: Mon, 30 Mar 2026 00:00:00 -0700
+Subject: [PATCH] NRF52840_GPIO: Fix external input lost when pin has pull-up
+
+When a GPIO connector drives a pin to its default state (e.g., LOW)
+before the firmware configures it, the InputValue setter early-returns
+because the value matches the existing State[] (both are false after
+reset).  This leaves everSet=true but State[] unchanged.
+
+Later, when firmware configures the pin with NRF_GPIO_PIN_PULLUP,
+DefaultValue is set to true.  Since everSet is true, GetCurrentValue()
+returns State[] (false) — which appears correct.
+
+However, if the connector never fires because the driving pin never
+transitions (STM32 PA6 starts at 0, stays at 0), OnGPIO is never
+called, everSet stays false, and GetCurrentValue() returns
+DefaultValue (true = pull-up).  The external LOW is invisible.
+
+The fix ensures the first external write always updates State[],
+even if the value matches the current (uninitialized) state.  This
+guarantees the external drive is recorded and overrides the pull-up
+default on subsequent reads.
+
+Also adds null-conditional to PinChanged event invocation for safety.
+
+---
+ .../GPIOPort/NRF52840_GPIO.cs                 | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/Emulator/Peripherals/Peripherals/GPIOPort/NRF52840_GPIO.cs b/src/Emulator/Peripherals/Peripherals/GPIOPort/NRF52840_GPIO.cs
+index b45c15f9b..ebe823c57 100644
+--- a/src/Emulator/Peripherals/Peripherals/GPIOPort/NRF52840_GPIO.cs
++++ b/src/Emulator/Peripherals/Peripherals/GPIOPort/NRF52840_GPIO.cs
+@@ -246,23 +246,23 @@ public bool InputValue
+ 
+                 set
+                 {
++                    var wasEverSet = everSet;
+                     everSet = true;
+ 
+                     if(Direction != PinDirection.Input)
+                     {
+-                        // buffer the value so that it can be used on a next direction change
+                         bufferedInputValue = value;
+                         return;
+                     }
+ 
+-                    if(value == Parent.State[Id])
++                    if(wasEverSet && value == Parent.State[Id])
+                     {
+                         return;
+                     }
+ 
+                     Parent.NoisyLog("Setting pin {0} input to {1}", Id, value);
+                     Parent.State[Id] = value;
+-                    Parent.PinChanged(this, value);
++                    Parent.PinChanged?.Invoke(this, value);
+                     Parent.UpdateDetect();
+                 }
+             }
+-- 
+2.39.5
+
